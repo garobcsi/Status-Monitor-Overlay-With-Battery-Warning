@@ -1,6 +1,12 @@
 class MicroOverlay : public tsl::Gui {
 private:
-	uint64_t mappedButtons = MapButtons(keyCombo); // map buttons
+	uint64_t closeMappedButtons = MapButtons(keyCombo); // map buttons
+	uint64_t hideMappedButtons = MapButtons("ZL+L+ZR+R");
+
+	bool hide = false;
+	bool flash = false;
+	uint16_t warning_color = 0;
+
 	char GPU_Load_c[32] = "";
 	char Rotation_SpeedLevel_c[64] = "";
 	char RAM_var_compressed_c[128] = "";
@@ -31,6 +37,8 @@ private:
 	uint64_t systemtickfrequency_impl = systemtickfrequency;
 public:
     MicroOverlay() { 
+		convertStrToRGBA4444("#f00f", &warning_color);
+
 		GetConfigSettings(&settings);
 		apmGetPerformanceMode(&performanceMode);
 		if (performanceMode == ApmPerformanceMode_Normal) {
@@ -56,7 +64,8 @@ public:
 		rootFrame = new tsl::elm::OverlayFrame("", "");
 
 		auto Status = new tsl::elm::CustomDrawer([this](tsl::gfx::Renderer *renderer, u16 x, u16 y, u16 w, u16 h) {
-
+			
+			if (!hide)
 			if (!Initialized) {
 				CPU_dimensions = renderer->drawString("CPU [100%,100%,100%,100%]△4444.4", false, 0, fontsize, fontsize, renderer->a(0x0000));
 				GPU_dimensions = renderer->drawString("GPU 100.0%△4444.4", false, 0, fontsize, fontsize, renderer->a(0x0000));
@@ -114,7 +123,8 @@ public:
 				base_y = tsl::cfg::FramebufferHeight - (fontsize + (fontsize / 4));
 			}
 
-			renderer->drawRect(0, base_y, tsl::cfg::FramebufferWidth, fontsize + (fontsize / 4), a(settings.backgroundColor));
+			renderer->drawRect(0, base_y, tsl::cfg::FramebufferWidth, fontsize + (fontsize / 4), a(PowerConsumption <= -8 && flash ? warning_color : hide ? 0: settings.backgroundColor));
+			flash = !flash;
 
 			uint32_t offset = 0;
 			if (settings.alignTo == 1) {
@@ -130,6 +140,8 @@ public:
 				else offset = tsl::cfg::FramebufferWidth - text_width;
 			}
 			uint8_t flags = 0;
+
+			if (!hide)
 			for (std::string key : tsl::hlp::split(settings.show, '+')) {
 				if (!key.compare("CPU") && !(flags & 1 << 0)) {
 					auto dimensions_s = renderer->drawString("CPU", false, offset, base_y+fontsize, fontsize, renderer->a(settings.catColor));
@@ -198,128 +210,133 @@ public:
 
 		//Make stuff ready to print
 		///CPU
-		if (idletick0 > systemtickfrequency_impl)
-			strcpy(CPU_Usage0, "0%");
-		else snprintf(CPU_Usage0, sizeof CPU_Usage0, "%.0f%%", (1.d - ((double)idletick0 / systemtickfrequency_impl)) * 100);
-		if (idletick1 > systemtickfrequency_impl)
-			strcpy(CPU_Usage1, "0%");
-		else snprintf(CPU_Usage1, sizeof CPU_Usage1, "%.0f%%", (1.d - ((double)idletick1 / systemtickfrequency_impl)) * 100);
-		if (idletick2 > systemtickfrequency_impl)
-			strcpy(CPU_Usage2, "0%");
-		else snprintf(CPU_Usage2, sizeof CPU_Usage2, "%.0f%%", (1.d - ((double)idletick2 / systemtickfrequency_impl)) * 100);
-		if (idletick3 > systemtickfrequency_impl)
-			strcpy(CPU_Usage3, "0%");
-		else snprintf(CPU_Usage3, sizeof CPU_Usage3, "%.0f%%", (1.d - ((double)idletick3 / systemtickfrequency_impl)) * 100);
+		if (!hide) {
+			if (idletick0 > systemtickfrequency_impl)
+				strcpy(CPU_Usage0, "0%");
+			else snprintf(CPU_Usage0, sizeof CPU_Usage0, "%.0f%%", (1.d - ((double)idletick0 / systemtickfrequency_impl)) * 100);
+			if (idletick1 > systemtickfrequency_impl)
+				strcpy(CPU_Usage1, "0%");
+			else snprintf(CPU_Usage1, sizeof CPU_Usage1, "%.0f%%", (1.d - ((double)idletick1 / systemtickfrequency_impl)) * 100);
+			if (idletick2 > systemtickfrequency_impl)
+				strcpy(CPU_Usage2, "0%");
+			else snprintf(CPU_Usage2, sizeof CPU_Usage2, "%.0f%%", (1.d - ((double)idletick2 / systemtickfrequency_impl)) * 100);
+			if (idletick3 > systemtickfrequency_impl)
+				strcpy(CPU_Usage3, "0%");
+			else snprintf(CPU_Usage3, sizeof CPU_Usage3, "%.0f%%", (1.d - ((double)idletick3 / systemtickfrequency_impl)) * 100);
+		}
 
 		mutexLock(&mutex_Misc);
-		char difference[5] = "@";
-		if (realCPU_Hz) {
-			int32_t deltaCPU = (int32_t)(realCPU_Hz / 1000) - (CPU_Hz / 1000);
-			if (deltaCPU > 20000) {
-				strcpy(difference, "△");
-			}
-			else if (deltaCPU < -50000) {
-				strcpy(difference, "≠");
-			}
-			else if (deltaCPU < -20000) {
-				strcpy(difference, "▽");
-			}
-		}
-		if (settings.realFrequencies && realCPU_Hz) {
-			snprintf(CPU_compressed_c, sizeof CPU_compressed_c, 
-				"[%s,%s,%s,%s]%s%d.%d", 
-				CPU_Usage0, CPU_Usage1, CPU_Usage2, CPU_Usage3, 
-				difference, 
-				realCPU_Hz / 1000000, (realCPU_Hz / 100000) % 10);
-		}
-		else {
-			snprintf(CPU_compressed_c, sizeof CPU_compressed_c, 
-				"[%s,%s,%s,%s]%s%d.%d", 
-				CPU_Usage0, CPU_Usage1, CPU_Usage2, CPU_Usage3, 
-				difference, 
-				CPU_Hz / 1000000, (CPU_Hz / 100000) % 10);
-		}
-		
-		///GPU
-		if (realGPU_Hz) {
-			int32_t deltaGPU = (int32_t)(realGPU_Hz / 1000) - (GPU_Hz / 1000);
-			if (deltaGPU >= 20000) {
-				strcpy(difference, "△");
-			}
-			else if (deltaGPU > -20000) {
-				strcpy(difference, "@");
-			}
-			else if (deltaGPU < -50000) {
-				strcpy(difference, "≠");
-			}
-			else if (deltaGPU < -20000) {
-				strcpy(difference, "▽");
-			}
-		}
-		else {
-			strcpy(difference, "@");
-		}
-		if (settings.realFrequencies && realGPU_Hz) {
-			snprintf(GPU_Load_c, sizeof GPU_Load_c, 
-				"%d.%d%%%s%d.%d", 
-				GPU_Load_u / 10, GPU_Load_u % 10, 
-				difference, 
-				realGPU_Hz / 1000000, (realGPU_Hz / 100000) % 10);
-		}
-		else {
-			snprintf(GPU_Load_c, sizeof GPU_Load_c, 
-				"%d.%d%%%s%d.%d", 
-				GPU_Load_u / 10, GPU_Load_u % 10, 
-				difference, 
-				GPU_Hz / 1000000, (GPU_Hz / 100000) % 10);
-		}
-		
-		///RAM
-		char MICRO_RAM_all_c[12] = "";
-		if (!settings.showRAMLoad || R_FAILED(sysclkCheck)) {
-			float RAM_Total_application_f = (float)RAM_Total_application_u / 1024 / 1024;
-			float RAM_Total_applet_f = (float)RAM_Total_applet_u / 1024 / 1024;
-			float RAM_Total_system_f = (float)RAM_Total_system_u / 1024 / 1024;
-			float RAM_Total_systemunsafe_f = (float)RAM_Total_systemunsafe_u / 1024 / 1024;
-			float RAM_Total_all_f = RAM_Total_application_f + RAM_Total_applet_f + RAM_Total_system_f + RAM_Total_systemunsafe_f;
-			float RAM_Used_application_f = (float)RAM_Used_application_u / 1024 / 1024;
-			float RAM_Used_applet_f = (float)RAM_Used_applet_u / 1024 / 1024;
-			float RAM_Used_system_f = (float)RAM_Used_system_u / 1024 / 1024;
-			float RAM_Used_systemunsafe_f = (float)RAM_Used_systemunsafe_u / 1024 / 1024;
-			float RAM_Used_all_f = RAM_Used_application_f + RAM_Used_applet_f + RAM_Used_system_f + RAM_Used_systemunsafe_f;
-			snprintf(MICRO_RAM_all_c, sizeof(MICRO_RAM_all_c), "%.1f/%.1fGB", RAM_Used_all_f/1024, RAM_Total_all_f/1024);
-		}
-		else {
-			snprintf(MICRO_RAM_all_c, sizeof(MICRO_RAM_all_c), "%hu.%hhu%%", ramLoad[SysClkRamLoad_All] / 10, ramLoad[SysClkRamLoad_All] % 10);
-		}
 
-		if (realRAM_Hz) {
-			int32_t deltaRAM = (int32_t)(realRAM_Hz / 1000) - (RAM_Hz / 1000);
-			if (deltaRAM >= 20000) {
-				strcpy(difference, "△");
+		if (!hide) {
+			char difference[5] = "@";
+			if (realCPU_Hz) {
+				int32_t deltaCPU = (int32_t)(realCPU_Hz / 1000) - (CPU_Hz / 1000);
+				if (deltaCPU > 20000) {
+					strcpy(difference, "△");
+				}
+				else if (deltaCPU < -50000) {
+					strcpy(difference, "≠");
+				}
+				else if (deltaCPU < -20000) {
+					strcpy(difference, "▽");
+				}
 			}
-			else if (deltaRAM > -20000) {
+			if (settings.realFrequencies && realCPU_Hz) {
+				snprintf(CPU_compressed_c, sizeof CPU_compressed_c, 
+					"[%s,%s,%s,%s]%s%d.%d", 
+					CPU_Usage0, CPU_Usage1, CPU_Usage2, CPU_Usage3, 
+					difference, 
+					realCPU_Hz / 1000000, (realCPU_Hz / 100000) % 10);
+			}
+			else {
+				snprintf(CPU_compressed_c, sizeof CPU_compressed_c, 
+					"[%s,%s,%s,%s]%s%d.%d", 
+					CPU_Usage0, CPU_Usage1, CPU_Usage2, CPU_Usage3, 
+					difference, 
+					CPU_Hz / 1000000, (CPU_Hz / 100000) % 10);
+			}
+			
+			///GPU
+			if (realGPU_Hz) {
+				int32_t deltaGPU = (int32_t)(realGPU_Hz / 1000) - (GPU_Hz / 1000);
+				if (deltaGPU >= 20000) {
+					strcpy(difference, "△");
+				}
+				else if (deltaGPU > -20000) {
+					strcpy(difference, "@");
+				}
+				else if (deltaGPU < -50000) {
+					strcpy(difference, "≠");
+				}
+				else if (deltaGPU < -20000) {
+					strcpy(difference, "▽");
+				}
+			}
+			else {
 				strcpy(difference, "@");
 			}
-			else if (deltaRAM < -50000) {
-				strcpy(difference, "≠");
+			if (settings.realFrequencies && realGPU_Hz) {
+				snprintf(GPU_Load_c, sizeof GPU_Load_c, 
+					"%d.%d%%%s%d.%d", 
+					GPU_Load_u / 10, GPU_Load_u % 10, 
+					difference, 
+					realGPU_Hz / 1000000, (realGPU_Hz / 100000) % 10);
 			}
-			else if (deltaRAM < -20000) {
-				strcpy(difference, "▽");
+			else {
+				snprintf(GPU_Load_c, sizeof GPU_Load_c, 
+					"%d.%d%%%s%d.%d", 
+					GPU_Load_u / 10, GPU_Load_u % 10, 
+					difference, 
+					GPU_Hz / 1000000, (GPU_Hz / 100000) % 10);
 			}
-		}
-		else {
-			strcpy(difference, "@");
-		}
-		if (settings.realFrequencies && realRAM_Hz) {
-			snprintf(RAM_var_compressed_c, sizeof RAM_var_compressed_c, 
-				"%s%s%d.%d", 
-				MICRO_RAM_all_c, difference, realRAM_Hz / 1000000, (realRAM_Hz / 100000) % 10);
-		}
-		else {
-			 snprintf(RAM_var_compressed_c, sizeof RAM_var_compressed_c, 
-				"%s%s%d.%d", 
-				MICRO_RAM_all_c, difference, RAM_Hz / 1000000, (RAM_Hz / 1000000) % 10);
+			
+			///RAM
+			char MICRO_RAM_all_c[12] = "";
+			if (!settings.showRAMLoad || R_FAILED(sysclkCheck)) {
+				float RAM_Total_application_f = (float)RAM_Total_application_u / 1024 / 1024;
+				float RAM_Total_applet_f = (float)RAM_Total_applet_u / 1024 / 1024;
+				float RAM_Total_system_f = (float)RAM_Total_system_u / 1024 / 1024;
+				float RAM_Total_systemunsafe_f = (float)RAM_Total_systemunsafe_u / 1024 / 1024;
+				float RAM_Total_all_f = RAM_Total_application_f + RAM_Total_applet_f + RAM_Total_system_f + RAM_Total_systemunsafe_f;
+				float RAM_Used_application_f = (float)RAM_Used_application_u / 1024 / 1024;
+				float RAM_Used_applet_f = (float)RAM_Used_applet_u / 1024 / 1024;
+				float RAM_Used_system_f = (float)RAM_Used_system_u / 1024 / 1024;
+				float RAM_Used_systemunsafe_f = (float)RAM_Used_systemunsafe_u / 1024 / 1024;
+				float RAM_Used_all_f = RAM_Used_application_f + RAM_Used_applet_f + RAM_Used_system_f + RAM_Used_systemunsafe_f;
+				snprintf(MICRO_RAM_all_c, sizeof(MICRO_RAM_all_c), "%.1f/%.1fGB", RAM_Used_all_f/1024, RAM_Total_all_f/1024);
+			}
+			else {
+				snprintf(MICRO_RAM_all_c, sizeof(MICRO_RAM_all_c), "%hu.%hhu%%", ramLoad[SysClkRamLoad_All] / 10, ramLoad[SysClkRamLoad_All] % 10);
+			}
+
+			if (realRAM_Hz) {
+				int32_t deltaRAM = (int32_t)(realRAM_Hz / 1000) - (RAM_Hz / 1000);
+				if (deltaRAM >= 20000) {
+					strcpy(difference, "△");
+				}
+				else if (deltaRAM > -20000) {
+					strcpy(difference, "@");
+				}
+				else if (deltaRAM < -50000) {
+					strcpy(difference, "≠");
+				}
+				else if (deltaRAM < -20000) {
+					strcpy(difference, "▽");
+				}
+			}
+			else {
+				strcpy(difference, "@");
+			}
+			if (settings.realFrequencies && realRAM_Hz) {
+				snprintf(RAM_var_compressed_c, sizeof RAM_var_compressed_c, 
+					"%s%s%d.%d", 
+					MICRO_RAM_all_c, difference, realRAM_Hz / 1000000, (realRAM_Hz / 100000) % 10);
+			}
+			else {
+				snprintf(RAM_var_compressed_c, sizeof RAM_var_compressed_c, 
+					"%s%s%d.%d", 
+					MICRO_RAM_all_c, difference, RAM_Hz / 1000000, (RAM_Hz / 1000000) % 10);
+			}
 		}
 		
 		char remainingBatteryLife[8];
@@ -330,24 +347,29 @@ public:
 		else snprintf(remainingBatteryLife, sizeof remainingBatteryLife, "-:--");
 
 		///Thermal
+		if (!hide)
 		snprintf(skin_temperature_c, sizeof skin_temperature_c, 
 			"%2.1f/%2.1f/%hu.%hhu\u00B0C@%+.1fW[%s]", 
 			SOC_temperatureF, PCB_temperatureF, 
 			skin_temperaturemiliC / 1000, (skin_temperaturemiliC / 100) % 10, 
 			PowerConsumption, remainingBatteryLife);
+
 		mutexUnlock(&mutex_BatteryChecker);
-		snprintf(Rotation_SpeedLevel_c, sizeof Rotation_SpeedLevel_c, "%2.1f%%", Rotation_Duty);
-		
-		///FPS
-		snprintf(FPS_var_compressed_c, sizeof FPS_var_compressed_c, "%2.1f", FPSavg);
+
+		if (!hide) {
+			snprintf(Rotation_SpeedLevel_c, sizeof Rotation_SpeedLevel_c, "%2.1f%%", Rotation_Duty);
+			
+			///FPS
+			snprintf(FPS_var_compressed_c, sizeof FPS_var_compressed_c, "%2.1f", FPSavg);
+		}
 
 		mutexUnlock(&mutex_Misc);
-		
-		
-		
 	}
 	virtual bool handleInput(uint64_t keysDown, uint64_t keysHeld, touchPosition touchInput, JoystickPosition leftJoyStick, JoystickPosition rightJoyStick) override {
-		if (isKeyComboPressed(keysHeld, keysDown, mappedButtons)) {
+		if(isKeyComboPressed(keysHeld, keysDown, hideMappedButtons)) {
+			hide = !hide;
+		}
+		if (isKeyComboPressed(keysHeld, keysDown, closeMappedButtons)) {
 			TeslaFPS = 60;
             if (skipMain)
                 tsl::goBack();
