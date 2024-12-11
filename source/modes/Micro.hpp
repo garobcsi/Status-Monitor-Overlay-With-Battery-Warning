@@ -123,7 +123,7 @@ public:
 				base_y = tsl::cfg::FramebufferHeight - (fontsize + (fontsize / 4));
 			}
 
-			renderer->drawRect(0, base_y, tsl::cfg::FramebufferWidth, fontsize + (fontsize / 4), a(PowerConsumption <= -8 && flash ? warning_color : hide ? 0: settings.backgroundColor));
+			renderer->drawRect(0, base_y, tsl::cfg::FramebufferWidth, fontsize + (fontsize / 4), a((PowerConsumption <= -8 || batCurrentAvg <=-2000) && flash ? warning_color : hide ? 0: settings.backgroundColor));
 			flash = !flash;
 
 			uint32_t offset = 0;
