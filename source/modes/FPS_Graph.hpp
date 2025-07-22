@@ -73,7 +73,7 @@ public:
 
 		auto Status = new tsl::elm::CustomDrawer([this](tsl::gfx::Renderer *renderer, u16 x, u16 y, u16 w, u16 h) {
 
-			if (refreshRate && refreshRate < 80) {
+			if (refreshRate && refreshRate < 240) {
 				rectangle_height = refreshRate;
 				rectangle_range_max = refreshRate;
 				legend_max[0] = 0x30 + (refreshRate / 10);
@@ -170,12 +170,15 @@ public:
 	virtual void update() override {
 		///FPS
 		stats temp = {0, false};
+		static float last = 0;
 		
 		uint8_t SaltySharedDisplayRefreshRate = *(uint8_t*)((uintptr_t)shmemGetAddr(&_sharedmemory) + 1);
 		if (SaltySharedDisplayRefreshRate) 
 			refreshRate = SaltySharedDisplayRefreshRate;
 		else refreshRate = 60;
 		if (FPSavg < 254) {
+			if (FPSavg == last) return;
+			else last = FPSavg;
 			if ((s16)(readings.size()) >= rectangle_width) {
 				readings.erase(readings.begin());
 			}
@@ -186,9 +189,10 @@ public:
 			}
 			readings.push_back(temp);
 		}
-		else {
+		else if (readings.size()) {
 			readings.clear();
 			readings.shrink_to_fit();
+			last = 0;
 		}
 		
 	}
