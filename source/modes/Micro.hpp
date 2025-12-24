@@ -1,6 +1,6 @@
 class MicroOverlay : public tsl::Gui {
 private:
-	uint64_t closeMappedButtons = MapButtons(keyCombo); // map buttons
+	uint64_t mappedButtons = MapButtons(keyCombo); // map buttons
 	uint64_t hideMappedButtons = MapButtons("ZL+L+ZR+R");
 
 	bool hide = false;
@@ -388,7 +388,7 @@ public:
 			if (delta < frametime) {
 				uint64_t time_delta = frametime - delta;
 				while (time_delta > 1000000) {
-					if(isKeyComboPressed(keysHeld, keysDown, hideMappedButtons)) {
+					if(isKeyComboPressed(padGetButtons(&pad), padGetButtonsDown(&pad), hideMappedButtons)) {
 						hide = !hide;
 					}
 					if (isKeyComboPressed(padGetButtons(&pad), padGetButtonsDown(&pad), mappedButtons)) {
