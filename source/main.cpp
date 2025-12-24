@@ -49,7 +49,11 @@ public:
 		return rootFrame;
 	}
 
-	virtual void update() override {}
+	virtual void update() override {
+		if (tsl::cfg::LayerPosX || tsl::cfg::LayerPosY) {
+			tsl::gfx::Renderer::getRenderer().setLayerPos(0, 0);
+		}
+	}
 
 	virtual bool handleInput(uint64_t keysDown, uint64_t keysHeld, touchPosition touchInput, JoystickPosition leftJoyStick, JoystickPosition rightJoyStick) override {
 		if (keysDown & KEY_B) {
@@ -106,7 +110,11 @@ public:
 		return rootFrame;
 	}
 
-	virtual void update() override {}
+	virtual void update() override {
+		if (tsl::cfg::LayerPosX || tsl::cfg::LayerPosY) {
+			tsl::gfx::Renderer::getRenderer().setLayerPos(0, 0);
+		}
+	}
 
 	virtual bool handleInput(uint64_t keysDown, uint64_t keysHeld, touchPosition touchInput, JoystickPosition leftJoyStick, JoystickPosition rightJoyStick) override {
 		if (keysDown & KEY_B) {
@@ -256,7 +264,7 @@ public:
 	}
 
 	virtual void exitServices() override {
-		CloseThreads();
+		CloseThreads(true);
 		if (R_SUCCEEDED(sysclkCheck)) {
 			sysclkIpcExit();
 		}
@@ -326,7 +334,7 @@ public:
 	}
 
 	virtual void exitServices() override {
-		CloseThreads();
+		CloseThreads(true);
 		shmemClose(&_sharedmemory);
 		if (R_SUCCEEDED(sysclkCheck)) {
 			sysclkIpcExit();
@@ -357,7 +365,10 @@ public:
 
 // This function gets called on startup to create a new Overlay object
 int main(int argc, char **argv) {
-	systemtickfrequency = armGetSystemTickFreq();
+	#if !defined(__SWITCH__) && !defined(__OUNCE__)
+		systemtickfrequency = armGetSystemTickFreq();
+	#endif
+
 	ParseIniFile(); // parse INI from file
     
 	if (argc > 0) {

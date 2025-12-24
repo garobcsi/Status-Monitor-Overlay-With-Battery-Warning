@@ -35,6 +35,7 @@ private:
 	size_t fontsize = 0;
 	bool showFPS = false;
 	uint64_t systemtickfrequency_impl = systemtickfrequency;
+	uint64_t frametime = 1000000000 / 60;
 public:
     MicroOverlay() { 
 		convertStrToRGBA4444("#f00f", &warning_color);
@@ -52,9 +53,14 @@ public:
 		mutexInit(&mutex_Misc);
 		TeslaFPS = settings.refreshRate;
 		systemtickfrequency_impl /= settings.refreshRate;
+		frametime = 1000000000 / settings.refreshRate;
+		idletick0 = systemtickfrequency_impl;
+		idletick1 = systemtickfrequency_impl;
+		idletick2 = systemtickfrequency_impl;
+		idletick3 = systemtickfrequency_impl;
 		alphabackground = 0x0;
 		deactivateOriginalFooter = true;
-        StartThreads();
+        StartThreads(NULL);
 	}
 	~MicroOverlay() {
 		CloseThreads();
@@ -213,18 +219,18 @@ public:
 		if (!hide) {
 			if (idletick0 > systemtickfrequency_impl)
 				strcpy(CPU_Usage0, "0%");
-			else snprintf(CPU_Usage0, sizeof CPU_Usage0, "%.0f%%", (1.d - ((double)idletick0 / systemtickfrequency_impl)) * 100);
+			else snprintf(CPU_Usage0, sizeof CPU_Usage0, "%.0lf%%", std::clamp((1.d - ((double)idletick0 / systemtickfrequency_impl)) * 100.d, 0.d, 100.d));
 			if (idletick1 > systemtickfrequency_impl)
 				strcpy(CPU_Usage1, "0%");
-			else snprintf(CPU_Usage1, sizeof CPU_Usage1, "%.0f%%", (1.d - ((double)idletick1 / systemtickfrequency_impl)) * 100);
+			else snprintf(CPU_Usage1, sizeof CPU_Usage1, "%.0lf%%", std::clamp((1.d - ((double)idletick1 / systemtickfrequency_impl)) * 100.d, 0.d, 100.d));
 			if (idletick2 > systemtickfrequency_impl)
 				strcpy(CPU_Usage2, "0%");
-			else snprintf(CPU_Usage2, sizeof CPU_Usage2, "%.0f%%", (1.d - ((double)idletick2 / systemtickfrequency_impl)) * 100);
+			else snprintf(CPU_Usage2, sizeof CPU_Usage2, "%.0lf%%", std::clamp((1.d - ((double)idletick2 / systemtickfrequency_impl)) * 100.d, 0.d, 100.d));
 			if (idletick3 > systemtickfrequency_impl)
 				strcpy(CPU_Usage3, "0%");
-			else snprintf(CPU_Usage3, sizeof CPU_Usage3, "%.0f%%", (1.d - ((double)idletick3 / systemtickfrequency_impl)) * 100);
+			else snprintf(CPU_Usage3, sizeof CPU_Usage3, "%.0lf%%", std::clamp((1.d - ((double)idletick3 / systemtickfrequency_impl)) * 100.d, 0.d, 100.d));
 		}
-
+		
 		mutexLock(&mutex_Misc);
 
 		if (!hide) {
@@ -355,29 +361,51 @@ public:
 			PowerConsumption, remainingBatteryLife);
 
 		mutexUnlock(&mutex_BatteryChecker);
-
+		
 		if (!hide) {
 			snprintf(Rotation_SpeedLevel_c, sizeof Rotation_SpeedLevel_c, "%2.1f%%", Rotation_Duty);
 			
 			///FPS
-			snprintf(FPS_var_compressed_c, sizeof FPS_var_compressed_c, "%2.1f", FPSavg);
+			float m_FPSavg = useOldFPSavg ? FPSavg_old : FPSavg;
+			if (m_FPSavg <= 0.f || m_FPSavg >= 1000.f || m_FPSavg == 254.f) {
+				strcpy(FPS_var_compressed_c, "n/d");
+			}
+			else snprintf(FPS_var_compressed_c, sizeof FPS_var_compressed_c, "%2.1f", m_FPSavg);
 		}
 
 		mutexUnlock(&mutex_Misc);
 	}
+	
 	virtual bool handleInput(uint64_t keysDown, uint64_t keysHeld, touchPosition touchInput, JoystickPosition leftJoyStick, JoystickPosition rightJoyStick) override {
-		if(isKeyComboPressed(keysHeld, keysDown, hideMappedButtons)) {
-			hide = !hide;
+		if (!TeslaFPS) TeslaFPS = settings.refreshRate;
+		static uint64_t last_time = 0;
+		if (!last_time) {
+			last_time = armTicksToNs(svcGetSystemTick());
 		}
-		if (isKeyComboPressed(keysHeld, keysDown, closeMappedButtons)) {
-			TeslaFPS = 60;
-            if (skipMain)
-                tsl::goBack();
-            else {
-			    tsl::setNextOverlay(filepath.c_str());
-			    tsl::Overlay::get()->close();
-            }
-			return true;
+		else {
+			uint64_t new_time = armTicksToNs(svcGetSystemTick());
+			uint64_t delta = new_time - last_time;
+			if (delta < frametime) {
+				uint64_t time_delta = frametime - delta;
+				while (time_delta > 1000000) {
+					if(isKeyComboPressed(keysHeld, keysDown, hideMappedButtons)) {
+						hide = !hide;
+					}
+					if (isKeyComboPressed(padGetButtons(&pad), padGetButtonsDown(&pad), mappedButtons)) {
+						TeslaFPS = 0;
+						if (skipMain)
+							tsl::goBack();
+						else {
+							tsl::setNextOverlay(filepath.c_str());
+							tsl::Overlay::get()->close();
+						}
+						return true;
+					}
+					svcSleepThread(1000000);
+					time_delta -= 1000000;
+				}
+			}
+			last_time = armTicksToNs(svcGetSystemTick());
 		}
 		return false;
 	}

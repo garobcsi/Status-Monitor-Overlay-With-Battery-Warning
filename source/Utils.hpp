@@ -36,9 +36,17 @@ Thread t4;
 Thread t6;
 Thread t7;
 Thread t5;
-uint64_t systemtickfrequency = 19200000;
-bool threadexit = false;
-bool threadexit2 = false;
+
+#ifdef __SWITCH__
+	#define systemtickfrequency 19200000
+#elif __OUNCE__
+	#define systemtickfrequency 31250000
+#else
+	uint64_t systemtickfrequency = 0;
+#endif
+
+LEvent threadexit = {0};
+uint32_t threadexit2 = 0;
 PwmChannelSession g_ICon;
 std::string folderpath = "sdmc:/switch/.overlays/";
 std::string filename = "";
@@ -96,6 +104,7 @@ float designedFullBatCapacity = 0;
 bool batteryFiltered = false;
 uint8_t batteryTimeLeftRefreshRate = 60;
 int32_t BatteryTimeCache[120];
+bool touchScreen = true;
 
 //Temperatures
 float SOC_temperatureF = 0;
@@ -156,10 +165,23 @@ struct NxFpsSharedBlock {
 	uint8_t SetBuffers;
 	uint8_t ActiveBuffers;
 	uint8_t SetActiveBuffers;
-	uint8_t displaySync;
+	union {
+		struct {
+			bool handheld: 1;
+			bool docked: 1;
+			unsigned int reserved: 6;
+		} NX_PACKED ds;
+		uint8_t general;
+	} displaySync;
 	resolutionCalls renderCalls[8];
 	resolutionCalls viewportCalls[8];
 	bool forceOriginalRefreshRate;
+	bool dontForce60InDocked;
+	bool forceSuspend;
+	uint8_t currentRefreshRate;
+	float readSpeedPerSecond;
+	uint8_t FPSlockedDocked;
+	uint64_t frameNumber;
 } NX_PACKED;
 
 NxFpsSharedBlock* NxFps = 0;
@@ -171,9 +193,12 @@ uintptr_t FPSavgaddress = 0;
 uint64_t PID = 0;
 uint32_t FPS = 0xFE;
 float FPSavg = 254;
+float FPSavg_old = 254;
+bool useOldFPSavg = false;
 SharedMemory _sharedmemory = {};
 bool SharedMemoryUsed = false;
 Handle remoteSharedMemory = 1;
+uint64_t lastFrameNumber = 0;
 
 //Read real freqs from sys-clk sysmodule
 uint32_t realCPU_Hz = 0;
@@ -251,17 +276,9 @@ bool CheckPort () {
 }
 
 void CheckIfGameRunning(void*) {
-	while (!threadexit2) {
+	do {
 		if (!check && R_FAILED(pmdmntGetApplicationProcessId(&PID))) {
 			GameRunning = false;
-			if (SharedMemoryUsed) {
-				(NxFps -> MAGIC) = 0;
-				(NxFps -> pluginActive) = false;
-				(NxFps -> FPS) = 0;
-				(NxFps -> FPSavg) = 0.0;
-				FPS = 254;
-				FPSavg = 254.0;
-			}
 			check = true;
 		}
 		else if (!GameRunning && SharedMemoryUsed) {
@@ -276,8 +293,7 @@ void CheckIfGameRunning(void*) {
 					}
 				}
 		}
-		svcSleepThread(1'000'000'000);
-	}
+	} while (!leventWait(&threadexit, 1'000'000'000));
 }
 
 Mutex mutex_BatteryChecker = {0};
@@ -327,7 +343,8 @@ void BatteryChecker(void*) {
 
 	size_t counter = 0;
 	uint64_t tick_TTE = svcGetSystemTick();
-	while (!threadexit) {
+	uint64_t nanoseconds = 1000;
+	do {
 		mutexLock(&mutex_BatteryChecker);
 		uint64_t startTick = svcGetSystemTick();
 
@@ -391,13 +408,14 @@ void BatteryChecker(void*) {
 		}
 
 		mutexUnlock(&mutex_BatteryChecker);
-		uint64_t nanosecondsPassed = armTicksToNs(svcGetSystemTick() - startTick);
-		if (nanosecondsPassed < 1'000'000'000 / 2) {
-			svcSleepThread((1'000'000'000 / 2) - nanosecondsPassed);
+		nanoseconds = armTicksToNs(svcGetSystemTick() - startTick);
+		if (nanoseconds < 1'000'000'000 / 2) {
+			nanoseconds = (1'000'000'000 / 2) - nanoseconds;
 		} else {
-			svcSleepThread(1'000);
+			nanoseconds = 1000;
 		}
-	}
+	} while(!leventWait(&threadexit, nanoseconds));
+
 	batTimeEstimate = -1;
 	_batteryChargeInfoFields = {0};
 	memset(BatteryTimeCache, 0, sizeof(BatteryTimeCache));
@@ -405,7 +423,12 @@ void BatteryChecker(void*) {
 	delete[] readingsVolt;
 }
 
-void StartBatteryThread() {
+void StartBatteryThread(bool skip = false) {
+	if (!skip) {
+		threadWaitForExit(&t7);
+		threadClose(&t7);
+		leventClear(&threadexit);
+	}
 	threadCreate(&t7, BatteryChecker, NULL, NULL, 0x4000, 0x3F, 3);
 	threadStart(&t7);
 }
@@ -413,18 +436,23 @@ void StartBatteryThread() {
 Mutex mutex_Misc = {0};
 
 void gpuLoadThread(void*) {
-	if (!GPULoadPerFrame && R_SUCCEEDED(nvCheck)) while(!threadexit) {
-		u8 average = 5;
-		u32 temp = 0;
-		nvIoctl(fd, NVGPU_GPU_IOCTL_PMU_GET_GPU_LOAD, &temp);
-		GPU_Load_u = ((GPU_Load_u * (average-1)) + temp) / average;
-		svcSleepThread(16'666'000);
-	}
+	#define gpu_samples_average 8
+	uint32_t gpu_load_array[gpu_samples_average] = {0};
+	size_t i = 0;
+	if (!GPULoadPerFrame && R_SUCCEEDED(nvCheck)) do {
+		u32 temp;
+		if (R_SUCCEEDED(nvIoctl(fd, NVGPU_GPU_IOCTL_PMU_GET_GPU_LOAD, &temp))) {
+			gpu_load_array[i++ % gpu_samples_average] = temp;
+			GPU_Load_u = std::accumulate(&gpu_load_array[0], &gpu_load_array[gpu_samples_average], 0) / gpu_samples_average;
+		}
+	} while(!leventWait(&threadexit, 16'666'000));
 }
 
 //Stuff that doesn't need multithreading
 void Misc(void*) {
-	while (!threadexit) {
+	u8 m_TeslaFPS = !TeslaFPS ? 60 : TeslaFPS;
+	uint64_t timeout_ns = m_TeslaFPS < 10 ? (1'000'000'000 / m_TeslaFPS) : 100'000'000;
+	do {
 		mutexLock(&mutex_Misc);
 		// CPU, GPU and RAM Frequency
 		if (R_SUCCEEDED(clkrstCheck)) {
@@ -485,6 +513,7 @@ void Misc(void*) {
 				temp = trunc(temp);
 				temp /= 10;
 				Rotation_Duty = 100.0 - temp;
+				if (Rotation_Duty <= 0) Rotation_Duty = 0.0000001;
 			}
 		}
 		
@@ -495,19 +524,24 @@ void Misc(void*) {
 		if (GameRunning) {
 			if (SharedMemoryUsed) {
 				FPS = (NxFps -> FPS);
-				FPSavg = 19'200'000.f / (std::accumulate<uint32_t*, float>(&(NxFps -> FPSticks[0]), &(NxFps -> FPSticks[10]), 0) / 10);
+				const size_t element_count = sizeof(NxFps -> FPSticks) / sizeof(NxFps -> FPSticks[0]);
+				FPSavg_old = (float)systemtickfrequency / (std::accumulate<uint32_t*, float>(&NxFps->FPSticks[0], &NxFps->FPSticks[element_count], 0) / element_count);
+				float FPS_in = (float)FPS;
+				if (FPSavg_old >= (FPS_in-0.25) && FPSavg_old <= (FPS_in+0.25)) 
+					FPSavg = FPS_in;
+				else FPSavg = FPSavg_old;
+				lastFrameNumber = NxFps -> frameNumber;
 			}
 		}
 		else FPSavg = 254;
 		
 		// Interval
 		mutexUnlock(&mutex_Misc);
-		svcSleepThread(TeslaFPS < 10 ? (1'000'000'000 / TeslaFPS) : 100'000'000);
-	}
+	} while (!leventWait(&threadexit, timeout_ns));
 }
 
 void Misc2(void*) {
-	while (!threadexit) {
+	do {
 		//DSP
 		if (R_SUCCEEDED(audsnoopCheck)) audsnoopGetDspUsage(&DSP_Load_u);
 
@@ -522,88 +556,29 @@ void Misc2(void*) {
 			if (!Nifm_internet_rc && (NifmConnectionType == NifmInternetConnectionType_WiFi))
 				Nifm_profile_rc = nifmGetCurrentNetworkProfile((NifmNetworkProfileData*)&Nifm_profile);
 		}
-		// Interval
-		svcSleepThread(100'000'000);
-	}
+	} while (!leventWait(&threadexit, 100'000'000));
 }
 
 //Check each core for idled ticks in intervals, they cannot read info about other core than they are assigned
 //In case of getting more than systemtickfrequency in idle, make it equal to systemtickfrequency to get 0% as output and nothing less
 //This is because making each loop also takes time, which is not considered because this will take also additional time
-void CheckCore0(void*) {
-	while (!threadexit) {
-		uint64_t idletick_a0 = 0;
-		uint64_t idletick_b0 = 0;
-		svcGetInfo(&idletick_b0, InfoType_IdleTickCount, INVALID_HANDLE, 0);
-		svcSleepThread(1'000'000'000 / TeslaFPS);
-		svcGetInfo(&idletick_a0, InfoType_IdleTickCount, INVALID_HANDLE, 0);
-		idletick0 = idletick_a0 - idletick_b0;
-	}
-}
-
-void CheckCore1(void*) {
-	while (!threadexit) {
-		uint64_t idletick_a1 = 0;
-		uint64_t idletick_b1 = 0;
-		svcGetInfo(&idletick_b1, InfoType_IdleTickCount, INVALID_HANDLE, 1);
-		svcSleepThread(1'000'000'000 / TeslaFPS);
-		svcGetInfo(&idletick_a1, InfoType_IdleTickCount, INVALID_HANDLE, 1);
-		idletick1 = idletick_a1 - idletick_b1;
-	}
-}
-
-void CheckCore2(void*) {
-	while (!threadexit) {
-		uint64_t idletick_a2 = 0;
-		uint64_t idletick_b2 = 0;
-		svcGetInfo(&idletick_b2, InfoType_IdleTickCount, INVALID_HANDLE, 2);
-		svcSleepThread(1'000'000'000 / TeslaFPS);
-		svcGetInfo(&idletick_a2, InfoType_IdleTickCount, INVALID_HANDLE, 2);
-		idletick2 = idletick_a2 - idletick_b2;
-	}
-}
-
-void CheckCore3(void*) {
-	while (!threadexit) {
-		uint64_t idletick_a3 = 0;
-		uint64_t idletick_b3 = 0;
-		svcGetInfo(&idletick_b3, InfoType_IdleTickCount, INVALID_HANDLE, 3);
-		svcSleepThread(1'000'000'000 / TeslaFPS);
-		svcGetInfo(&idletick_a3, InfoType_IdleTickCount, INVALID_HANDLE, 3);
-		idletick3 = idletick_a3 - idletick_b3;
+void CheckCore(void* idletick_ptr) {
+	u8 m_TeslaFPS = !TeslaFPS ? 60 : TeslaFPS;
+	uint64_t timeout_ns = 1'000'000'000 / m_TeslaFPS;
+	uint64_t* idletick = (uint64_t*)idletick_ptr;
+	while(true) {
+		uint64_t idletick_a;
+		uint64_t idletick_b;
+		svcGetInfo(&idletick_b, InfoType_IdleTickCount, INVALID_HANDLE, -1);
+		Result rc_break = svcWaitForAddress(&threadexit2, ArbitrationType_WaitIfEqual, 0, timeout_ns);
+		svcGetInfo(&idletick_a, InfoType_IdleTickCount, INVALID_HANDLE, -1);
+		if (R_SUCCEEDED(rc_break)) return;
+		*idletick = idletick_a - idletick_b;
 	}
 }
 
 //Start reading all stats
-void StartThreads() {
-	threadCreate(&t0, CheckCore0, NULL, NULL, 0x1000, 0x10, 0);
-	threadCreate(&t1, CheckCore1, NULL, NULL, 0x1000, 0x10, 1);
-	threadCreate(&t2, CheckCore2, NULL, NULL, 0x1000, 0x10, 2);
-	threadCreate(&t3, CheckCore3, NULL, NULL, 0x1000, 0x10, 3);
-	threadCreate(&t4, Misc, NULL, NULL, 0x1000, 0x3F, -2);
-	threadCreate(&t5, gpuLoadThread, NULL, NULL, 0x1000, 0x3F, -2);
-	if (SaltySD) {
-		//Assign NX-FPS to default core
-		threadCreate(&t6, CheckIfGameRunning, NULL, NULL, 0x1000, 0x38, -2);
-	}
-				
-	threadStart(&t0);
-	threadStart(&t1);
-	threadStart(&t2);
-	threadStart(&t3);
-	threadStart(&t4);
-	threadStart(&t5);
-	if (SaltySD) {
-		//Start NX-FPS detection
-		threadStart(&t6);
-	}
-	StartBatteryThread();
-}
-
-//End reading all stats
-void CloseThreads() {
-	threadexit = true;
-	threadexit2 = true;
+void StartThreads(void*) {
 	threadWaitForExit(&t0);
 	threadWaitForExit(&t1);
 	threadWaitForExit(&t2);
@@ -612,49 +587,106 @@ void CloseThreads() {
 	threadWaitForExit(&t5);
 	threadWaitForExit(&t6);
 	threadWaitForExit(&t7);
+	leventClear(&threadexit);
+	threadexit2 = 0;
+
 	threadClose(&t0);
+	threadCreate(&t0, CheckCore, &idletick0, NULL, 0x1000, 0x10, 0);
+	threadStart(&t0);
+
 	threadClose(&t1);
+	threadCreate(&t1, CheckCore, &idletick1, NULL, 0x1000, 0x10, 1);
+	threadStart(&t1);
+
 	threadClose(&t2);
+	threadCreate(&t2, CheckCore, &idletick2, NULL, 0x1000, 0x10, 2);
+	threadStart(&t2);
+
 	threadClose(&t3);
+	threadCreate(&t3, CheckCore, &idletick3, NULL, 0x1000, 0x10, 3);
+	threadStart(&t3);
+
 	threadClose(&t4);
+	threadCreate(&t4, Misc, NULL, NULL, 0x1000, 0x3F, -2);
+	threadStart(&t4);
+
 	threadClose(&t5);
+	threadCreate(&t5, gpuLoadThread, NULL, NULL, 0x1000, 0x3F, -2);
+	threadStart(&t5);
+
 	threadClose(&t6);
+	if (SaltySD) {
+		//Assign NX-FPS to default core
+		threadCreate(&t6, CheckIfGameRunning, NULL, NULL, 0x1000, 0x38, -2);
+		//Start NX-FPS detection
+		threadStart(&t6);
+	}
+
 	threadClose(&t7);
-	threadexit = false;
-	threadexit2 = false;
+	StartBatteryThread(true);
+}
+
+//End reading all stats
+void CloseThreads(bool wait = false) {
+	svcSignalToAddress(&threadexit2, SignalType_SignalAndIncrementIfEqual, 0, 4);
+	leventSignal(&threadexit);
+	if (wait) {
+		threadWaitForExit(&t0);
+		threadWaitForExit(&t1);
+		threadWaitForExit(&t2);
+		threadWaitForExit(&t3);
+		threadWaitForExit(&t4);
+		threadWaitForExit(&t5);
+		threadWaitForExit(&t6);
+		threadWaitForExit(&t7);
+		threadClose(&t0);
+		threadClose(&t1);
+		threadClose(&t2);
+		threadClose(&t3);
+		threadClose(&t4);
+		threadClose(&t5);
+		threadClose(&t6);
+		threadClose(&t7);
+	}
 }
 
 //Separate functions dedicated to "FPS Counter" mode
 void FPSCounter(void*) {
-	while (!threadexit) {
+	u8 m_TeslaFPS = !TeslaFPS ? 60 : TeslaFPS;
+	uint64_t timeout_ns = 1'000'000'000 / m_TeslaFPS;
+	do {
 		if (GameRunning) {
 			if (SharedMemoryUsed) {
 				FPS = (NxFps -> FPS);
-				FPSavg = 19'200'000.f / (std::accumulate<uint32_t*, float>(&(NxFps -> FPSticks[0]), &(NxFps -> FPSticks[10]), 0) / 10);
+				const size_t element_count = sizeof(NxFps -> FPSticks) / sizeof(NxFps -> FPSticks[0]);
+				FPSavg_old = (float)systemtickfrequency / (std::accumulate<uint32_t*, float>(&NxFps->FPSticks[0], &NxFps->FPSticks[element_count], 0) / element_count);
+				float FPS_in = (float)FPS;
+				if (FPSavg_old >= (FPS_in-0.25) && FPSavg_old <= (FPS_in+0.25)) 
+					FPSavg = FPS_in;
+				else FPSavg = FPSavg_old;
+				lastFrameNumber = NxFps -> frameNumber;
 			}
 		}
 		else FPSavg = 254;
-		svcSleepThread(1'000'000'000 / TeslaFPS);
-	}
+	} while (!leventWait(&threadexit, timeout_ns));
 }
 
 void StartFPSCounterThread() {
-	//Assign NX-FPS to default core
+	threadWaitForExit(&t0);
+	threadWaitForExit(&t6);
+	leventClear(&threadexit);
+
+	threadClose(&t6);
 	threadCreate(&t6, CheckIfGameRunning, NULL, NULL, 0x1000, 0x38, -2);
+	threadStart(&t6);
+
+	threadClose(&t0);
 	threadCreate(&t0, FPSCounter, NULL, NULL, 0x1000, 0x3F, 3);
 	threadStart(&t0);
-	threadStart(&t6);
 }
 
 void EndFPSCounterThread() {
-	threadexit = true;
-	threadexit2 = true;
-	threadWaitForExit(&t0);
-	threadClose(&t0);
-	threadWaitForExit(&t6);
-	threadClose(&t6);
-	threadexit = false;
-	threadexit2 = false;
+	leventSignal(&threadexit);
 }
 
 
@@ -785,7 +817,18 @@ uint64_t MapButtons(const std::string& buttonCombo) {
 }
 
 ALWAYS_INLINE bool isKeyComboPressed(uint64_t keysHeld, uint64_t keysDown, uint64_t comboBitmask) {
-	return (keysDown == comboBitmask) || (keysHeld == comboBitmask);
+	uint64_t expectedPressTime = 200'000'000;
+	static uint64_t first_time_checked = 0;
+	if ((keysDown == comboBitmask) || (keysHeld == comboBitmask)) {
+		if (!first_time_checked) {
+			first_time_checked = armTicksToNs(svcGetSystemTick());
+			return false;
+		}
+		uint64_t second_time_checked = armTicksToNs(svcGetSystemTick());
+		if (second_time_checked - first_time_checked > expectedPressTime) return true;
+	}
+	else first_time_checked = 0;
+	return false;
 }
 
 // Custom utility function for parsing an ini file
@@ -861,6 +904,16 @@ void ParseIniFile() {
 				auto key = parsedData["status-monitor"]["average_gpu_load"];
 				convertToUpper(key);
 				GPULoadPerFrame = key.compare("TRUE");
+			}
+			if (parsedData["status-monitor"].find("use_old_fps_average") != parsedData["status-monitor"].end()) {
+				auto key = parsedData["status-monitor"]["use_old_fps_average"];
+				convertToUpper(key);
+				useOldFPSavg = !key.compare("TRUE");
+			}
+			if (parsedData["status-monitor"].find("touch_screen") != parsedData["status-monitor"].end()) {
+				auto key = parsedData["status-monitor"]["touch_screen"];
+				convertToUpper(key);
+				touchScreen = key.compare("FALSE");
 			}
 		}
 		
@@ -944,6 +997,7 @@ struct FullSettings {
 	bool showTargetFreqs;
 	bool showFPS;
 	bool showRES;
+	bool showRDSD;
 };
 
 struct MiniSettings {
@@ -1011,7 +1065,7 @@ ALWAYS_INLINE void GetConfigSettings(MiniSettings* settings) {
 	convertStrToRGBA4444("#1117", &(settings -> backgroundColor));
 	convertStrToRGBA4444("#FFFF", &(settings -> catColor));
 	convertStrToRGBA4444("#FFFF", &(settings -> textColor));
-	settings -> show = "CPU+GPU+RAM+TEMP+DRAW+FAN+FPS+RES";
+	settings -> show = "CPU+GPU+RAM+TEMP+DRAW+FAN+FPS+RES+READ";
 	settings -> showRAMLoad = true;
 	settings -> refreshRate = 1;
 	settings -> setPos = 0;
@@ -1431,6 +1485,7 @@ ALWAYS_INLINE void GetConfigSettings(FullSettings* settings) {
 	settings -> showTargetFreqs = true;
 	settings -> showFPS = true;
 	settings -> showRES = true;
+	settings -> showRDSD = true;
 
 	FILE* configFileIn = fopen("sdmc:/config/status-monitor/config.ini", "r");
 	if (!configFileIn)
@@ -1491,6 +1546,11 @@ ALWAYS_INLINE void GetConfigSettings(FullSettings* settings) {
 		key = parsedData[mode]["show_res"];
 		convertToUpper(key);
 		settings -> showRES = key.compare("FALSE");
+	}
+	if (parsedData[mode].find("show_read_speed") != parsedData[mode].end()) {
+		key = parsedData[mode]["show_read_speed"];
+		convertToUpper(key);
+		settings -> showRDSD = key.compare("FALSE");
 	}
 }
 
@@ -1571,3 +1631,4 @@ ALWAYS_INLINE void GetConfigSettings(ResolutionSettings* settings) {
 		}
 	}
 }
+
