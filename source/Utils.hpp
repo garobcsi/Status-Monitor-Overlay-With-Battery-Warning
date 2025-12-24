@@ -11,6 +11,7 @@
 #include <numeric>
 #include <tesla.hpp>
 #include <sys/stat.h>
+#include <initializer_list>
 
 #if defined(__cplusplus)
 extern "C"
@@ -829,6 +830,36 @@ ALWAYS_INLINE bool isKeyComboPressed(uint64_t keysHeld, uint64_t keysDown, uint6
 	}
 	else first_time_checked = 0;
 	return false;
+}
+
+
+ALWAYS_INLINE uint64_t isKeyComboPressed(uint64_t keysHeld, uint64_t keysDown, std::initializer_list<uint64_t> combos) {
+    uint64_t expectedPressTime = 200'000'000;
+    
+    static uint64_t first_time_checked = 0;
+    static uint64_t tracking_combo = 0;
+
+    for (uint64_t comboBitmask : combos) {
+        if ((keysDown == comboBitmask) || (keysHeld == comboBitmask)) {
+            
+            if (tracking_combo != comboBitmask) {
+                tracking_combo = comboBitmask;
+                first_time_checked = armTicksToNs(svcGetSystemTick());
+                return 0;
+            }
+            
+			uint64_t current_time = armTicksToNs(svcGetSystemTick());
+            if (current_time - first_time_checked > expectedPressTime) {
+                return comboBitmask;
+            }
+            
+            return 0; 
+        }
+    }
+
+    first_time_checked = 0;
+    tracking_combo = 0;
+    return 0;
 }
 
 // Custom utility function for parsing an ini file

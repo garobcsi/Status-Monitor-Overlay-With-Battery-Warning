@@ -388,10 +388,13 @@ public:
 			if (delta < frametime) {
 				uint64_t time_delta = frametime - delta;
 				while (time_delta > 1000000) {
-					if(isKeyComboPressed(padGetButtons(&pad), padGetButtonsDown(&pad), hideMappedButtons)) {
+					uint64_t detectedCombo = isKeyComboPressed(padGetButtons(&pad), padGetButtonsDown(&pad),{hideMappedButtons, mappedButtons});
+					if(detectedCombo == hideMappedButtons) {
 						hide = !hide;
+						svcSleepThread(1000*1000*2000);
+						return true;
 					}
-					if (isKeyComboPressed(padGetButtons(&pad), padGetButtonsDown(&pad), mappedButtons)) {
+					if (detectedCombo == mappedButtons) {
 						TeslaFPS = 0;
 						if (skipMain)
 							tsl::goBack();
